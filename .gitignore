@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller output (GestureHud.exe is ~20MB; ship it as a release asset)
+build/
+dist/
+
+# Local runtime state lives in %LOCALAPPDATA%\GestureHud, never here
+*.log
+settings.json
+calibration.json
