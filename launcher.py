@@ -256,6 +256,12 @@ class AppLauncher:
                 if _bring_to_front(hwnd):
                     log.info("raised existing window of %s", target.name)
                     return True
+                # It exists but could not be raised - do not fall through to
+                # relaunch: MotionAssistant is single-instance and re-running
+                # it while already running does nothing (see module
+                # docstring), so the tap would look dead with no clue why.
+                log.warning("found %s but could not raise its window", target.name)
+                return False
             # Not running at all - fall through and start it.
 
         # ShellExecuteW rather than subprocess.Popen: MotionAssistant.exe

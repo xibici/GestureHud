@@ -14,6 +14,48 @@ from pathlib import Path
 
 import singleton
 
+
+def _is_elevated() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _relaunch_elevated() -> bool:
+    """Re-run this process elevated via a UAC prompt. True if that was accepted."""
+    SW_SHOWNORMAL = 1
+    if getattr(sys, "frozen", False):
+        exe, args = sys.executable, sys.argv[1:]
+    else:
+        exe, args = sys.executable, [__file__, *sys.argv[1:]]
+    params = " ".join(f'"{a}"' for a in args)
+    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, SW_SHOWNORMAL)
+    return rc > 32
+
+
+# Raising the window of an app that needs elevation (MotionAssistant, opened
+# by the three-finger tap - see launcher.py) requires this process to be at
+# the same integrity level or higher: Windows' UIPI unconditionally blocks
+# SetForegroundWindow/AttachThreadInput from a lower-integrity caller, with no
+# workaround available from this side. Confirmed live: every tap on that app
+# silently fell through to a no-op relaunch (MotionAssistant is single
+# instance, so re-running it does nothing - see launcher.py). Hence this
+# always runs elevated, checked and fixed up before anything else -
+# including the singleton mutex below, which lives in the session's shared
+# namespace regardless of integrity level, so acquiring it here first would
+# make the elevated relaunch see itself as "already running" and quit.
+if not _is_elevated():
+    if not _relaunch_elevated():
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "手势HUD需要管理员权限才能运行(用于三指点击呼出需要提权的应用),"
+            "但未能获得授权,程序将退出。",
+            "GestureHud",
+            0x30,  # MB_ICONWARNING
+        )
+    sys.exit(0)
+
 # Checked before anything else - including logging setup - so a second
 # instance never even opens the shared log file, let alone creates windows
 # or hooks that would fight with the first instance's.
@@ -108,7 +150,10 @@ class App:
                                     self.settings["three_finger_selected"])
 
         # A rebuild or a move leaves the logon entry pointing at the old path.
-        autostart.refresh_if_stale()
+        # Also doubles as the tray's initial autostart state below, so that
+        # doesn't need its own separate (and slower - each is a schtasks.exe
+        # spawn) round trip through the scheduled task.
+        autostart_enabled = autostart.refresh_if_stale()
 
         # Some devices (this one included) implement WMI brightness SET
         # correctly but never update the CurrentBrightness readback, so we
@@ -154,7 +199,7 @@ class App:
                                initial_three_finger_app=self.settings["three_finger_selected"],
                                on_set_three_finger_app=self._on_set_three_finger_app,
                                on_toggle_autostart=self._on_toggle_autostart,
-                               initial_autostart=autostart.is_enabled(),
+                               initial_autostart=autostart_enabled,
                                initial_enabled=self.settings["enabled"])
         threading.Thread(target=self.tray.run, daemon=True).start()
 
@@ -324,8 +369,8 @@ class App:
             self.rawtouch.set_three_finger_tap(enabled)
 
     def _on_toggle_autostart(self, enabled: bool) -> bool:
-        """Returns what the registry actually says afterwards, so the tray
-        checkmark reflects reality rather than the attempted change."""
+        """Returns what the scheduled task actually says afterwards, so the
+        tray checkmark reflects reality rather than the attempted change."""
         autostart.enable() if enabled else autostart.disable()
         return autostart.is_enabled()
 

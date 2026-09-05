@@ -1,7 +1,7 @@
 """System tray icon: toggle gestures on/off, quit the app."""
-from PIL import Image, ImageDraw
 import pystray
 
+from icon import make_icon_image
 from settings import SENSITIVITY_PRESETS
 
 SENSITIVITY_LABELS = [
@@ -9,16 +9,6 @@ SENSITIVITY_LABELS = [
     ("medium", "适中(推荐)"),
     ("low", "精细(需要长滑动)"),
 ]
-
-
-def _make_icon_image() -> Image.Image:
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.pieslice([2, 2, size - 2, size - 2], 90, 270, fill=(245, 197, 66, 255))   # sun half
-    d.pieslice([2, 2, size - 2, size - 2], 270, 90, fill=(66, 148, 245, 255))   # speaker half
-    d.ellipse([2, 2, size - 2, size - 2], outline=(28, 28, 30, 255), width=2)
-    return img
 
 
 def build_tray(on_toggle_enabled, on_toggle_hud, on_recalibrate, on_quit,
@@ -157,4 +147,4 @@ def build_tray(on_toggle_enabled, on_toggle_hud, on_recalibrate, on_quit,
         pystray.MenuItem("重新校准触摸", recalibrate),
         pystray.MenuItem("退出", quit_app),
     )
-    return pystray.Icon("gesture_hud", _make_icon_image(), "Gesture HUD", menu)
+    return pystray.Icon("gesture_hud", make_icon_image(64), "Gesture HUD", menu)

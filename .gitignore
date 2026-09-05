@@ -8,6 +8,10 @@ venv/
 build/
 dist/
 
+# Regenerated from icon.py on every build (GestureHud.spec) - same class of
+# build artifact as build/ and dist/ above, just not inside either directory.
+icon.ico
+
 # Local runtime state lives in %LOCALAPPDATA%\GestureHud, never here
 *.log
 settings.json
