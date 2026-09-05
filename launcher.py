@@ -8,11 +8,17 @@ probed live on this machine:
   by running the exe again; the second process signals the resident one and
   exits. Running it once more hides it again (same PID, window visible
   0 -> 1 -> 0), so re-launching gives tap-to-open / tap-to-close for free.
-- MotionAssistant.exe is also single-instance, but re-running it does
-  nothing at all: the foreground window never changed and the process count
-  stayed at 1. It sits minimized instead, so its window has to be restored
-  and raised directly. It also requires elevation, so launching it is a
-  last resort (see ShellExecuteW in open()).
+- MotionAssistant.exe was probed as single-instance with a minimized window
+  that needed restoring and raising directly, back when GestureHud itself
+  ran unelevated - launching it (it needs elevation) failed silently every
+  time, which is what made re-running it look like a no-op. Under an
+  elevated GestureHud the launch actually succeeds, repeatedly: live
+  diagnostics (see _main_window's logging) showed every tap spawning a new
+  MotionAssistant.exe process that piled up alongside the earlier ones,
+  none of them ever gaining a visible top-level window - not even one
+  started directly (outside GestureHud) shows one on this machine. So
+  METHOD_RAISE's fallback path below only ever launches once per still-
+  running process; see open().
 
 Hence the rule in open(): restore/raise an existing window if there is one,
 otherwise run the exe and let the app decide what that means. Legion's
@@ -120,17 +126,25 @@ def _main_window(pids):
     if not pids:
         return None
     found = []
+    candidates = []  # every top-level window owned by `pids`, for diagnosis
 
     def cb(hwnd, _lparam):
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value not in pids or not user32.IsWindowVisible(hwnd):
+        if pid.value not in pids:
             return True
-        if not user32.GetWindowTextLengthW(hwnd):
+        visible = bool(user32.IsWindowVisible(hwnd))
+        has_text = bool(user32.GetWindowTextLengthW(hwnd))
+        iconic = bool(user32.IsIconic(hwnd))
+        if not has_text:
+            candidates.append((hwnd, pid.value, "visible" if visible else "hidden", "untitled", None))
             return True
         rect = wintypes.RECT()
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        if user32.IsIconic(hwnd):
+        size = (rect.right - rect.left, rect.bottom - rect.top)
+        candidates.append((hwnd, pid.value, "visible" if visible else "hidden", "titled",
+                           ("iconic" if iconic else "normal", size)))
+        if iconic:
             # A minimized window's rect is a stub (measured 356x59 for
             # MotionAssistant), so the size filter below would throw away
             # exactly the window being looked for - which is what made the tap
@@ -138,14 +152,36 @@ def _main_window(pids):
             # below any real window rather than above: scoring it by a huge
             # constant made a minimized *dialog* beat the actual main window
             # (reproduced with a 900x700 window plus a minimized 300x250 one).
+            #
+            # Deliberately not gated on `visible` here either: live inspection
+            # of MotionAssistant's actual main window (title "Motion
+            # Assistant 体感助手 V1.2.0.7") found it carries WS_MINIMIZE but
+            # WS_VISIBLE was never set at all - a "start minimized to the
+            # tray" app whose form is never Show()'n at startup, not merely
+            # parked off-screen.
             found.append((hwnd, 0, 0))
-        elif rect.right - rect.left >= 200 and rect.bottom - rect.top >= 200:
-            area = (rect.right - rect.left) * (rect.bottom - rect.top)
-            found.append((hwnd, 1, area))  # else: tooltips, IME, helper windows
+        elif size[0] >= 200 and size[1] >= 200:
+            # Also not gated on `visible`: the same window, after being
+            # raised once, was later found titled/normal-sized (1944x1152)
+            # but hidden again with no WS_MINIMIZE - MotionAssistant hides
+            # rather than minimizes on its own (closing it, losing focus,
+            # ...), so a tap after that point has to treat "hidden but
+            # sized like a real window" as raisable too, not just the
+            # iconic case above. else: tooltips, IME, helper windows - all
+            # measured at 0x0 or well under this threshold (an AMD ADLX
+            # helper window came in at 204x59).
+            found.append((hwnd, 1, size[0] * size[1]))
         return True
 
     proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)(cb)
     user32.EnumWindows(proc, 0)
+    if not found:
+        # Not a failure by itself (the app may genuinely not be running), but
+        # when it IS running (pids non-empty) and still nothing qualifies,
+        # this is the only record of why - there is no other way to tell
+        # "no window at all" apart from "a window that got filtered out".
+        log.info("no raisable window among %d candidate(s) for pid(s) %s: %s",
+                 len(candidates), sorted(pids), candidates)
     return max(found, key=lambda f: (f[1], f[2]))[0] if found else None
 
 
@@ -239,30 +275,39 @@ class AppLauncher:
             return False
 
         if (entry or {}).get("method") == METHOD_RAISE:
-            hwnd = _main_window(_pids_for(target.name))
-            if hwnd:
-                if hwnd == user32.GetForegroundWindow():
-                    # Tap again with it already in front: put it away. It must
-                    # NOT fall through to the launch below - MotionAssistant
-                    # needs elevation, so that path pops a UAC prompt on every
-                    # single tap while the app is focused (reproduced).
-                    # Through the app's own message loop, so a tray app puts
-                    # itself away the way it means to - same reason as
-                    # _restore().
-                    if not _sys_command(hwnd, SC_MINIMIZE):
-                        user32.ShowWindow(hwnd, SW_MINIMIZE)
-                    log.info("minimized %s", target.name)
-                    return True
-                if _bring_to_front(hwnd):
-                    log.info("raised existing window of %s", target.name)
-                    return True
-                # It exists but could not be raised - do not fall through to
-                # relaunch: MotionAssistant is single-instance and re-running
-                # it while already running does nothing (see module
-                # docstring), so the tap would look dead with no clue why.
-                log.warning("found %s but could not raise its window", target.name)
+            pids = _pids_for(target.name)
+            if pids:
+                hwnd = _main_window(pids)
+                if hwnd:
+                    if hwnd == user32.GetForegroundWindow():
+                        # Tap again with it already in front: put it away. It
+                        # must NOT fall through to the launch below -
+                        # MotionAssistant needs elevation, so that path pops a
+                        # UAC prompt on every single tap while the app is
+                        # focused (reproduced).
+                        # Through the app's own message loop, so a tray app
+                        # puts itself away the way it means to - same reason
+                        # as _restore().
+                        if not _sys_command(hwnd, SC_MINIMIZE):
+                            user32.ShowWindow(hwnd, SW_MINIMIZE)
+                        log.info("minimized %s", target.name)
+                        return True
+                    if _bring_to_front(hwnd):
+                        log.info("raised existing window of %s", target.name)
+                        return True
+                    log.warning("found %s but could not raise its window", target.name)
+                    return False
+                # It is running (>=1 process) but has no window that
+                # qualifies as raisable - do NOT fall through to relaunch:
+                # reproduced live that this piles up a fresh process on every
+                # single tap (MotionAssistant does not dedupe itself the way
+                # it seemed to before elevation), none of them ever gaining a
+                # visible window either. Repeating an already-failing launch
+                # cannot fix that; it only wastes a process each time.
+                log.warning("%s is running (%d process(es)) but has no visible window; not relaunching",
+                           target.name, len(pids))
                 return False
-            # Not running at all - fall through and start it.
+            log.info("%s not running; launching", target.name)
 
         # ShellExecuteW rather than subprocess.Popen: MotionAssistant.exe
         # requires elevation (it loads a kernel driver), and CreateProcess -
