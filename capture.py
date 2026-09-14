@@ -33,9 +33,10 @@ WS_EX_TOOLWINDOW = 0x00000080
 
 ACTIVATE_THRESHOLD = 14  # px of mostly-vertical movement needed to claim a drag as our gesture
 STRIP_WIDTH = 140  # px, pinned to each screen edge
-# Faint tint so the swipe zones are discoverable without being distracting.
+# Fully transparent: the strip still captures touches for gesture detection,
+# it just no longer paints a visible tint over the screen edge.
 STRIP_COLOR = "#3a8fe0"
-STRIP_ALPHA = 0.07
+STRIP_ALPHA = 0.0
 
 IDLE, PENDING, ACTIVE = "idle", "pending", "active"
 
