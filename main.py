@@ -198,6 +198,7 @@ class App:
                                three_finger_apps=self.settings["three_finger_apps"],
                                initial_three_finger_app=self.settings["three_finger_selected"],
                                on_set_three_finger_app=self._on_set_three_finger_app,
+                               on_open_three_finger_app=self._on_open_three_finger_app,
                                on_toggle_autostart=self._on_toggle_autostart,
                                initial_autostart=autostart_enabled,
                                initial_enabled=self.settings["enabled"])
@@ -378,6 +379,19 @@ class App:
         self.settings["three_finger_selected"] = index
         settings_store.save(self.settings)
         self.launcher.set_selected(index)
+
+    def _on_open_three_finger_app(self):
+        """Tray item: open the selected app without making the gesture.
+
+        Runs on a short-lived thread rather than inline. Opening can block for
+        a long time - a target that needs elevation (MotionAssistant) waits on
+        the UAC prompt, and raising someone else's window can wait up to a
+        second on its message loop (see launcher._sys_command) - while pystray
+        runs menu callbacks on its own thread, so doing it inline would freeze
+        the tray menu for the duration. Nothing on this path touches Tk, so a
+        plain daemon thread is enough.
+        """
+        threading.Thread(target=self.launcher.open, daemon=True).start()
 
     def _on_set_sensitivity(self, range_fraction: float):
         self.range_fraction = range_fraction

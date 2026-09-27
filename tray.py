@@ -1,4 +1,5 @@
 """System tray icon: toggle gestures on/off, quit the app."""
+import launcher
 import pystray
 
 from icon import make_icon_image
@@ -11,13 +12,29 @@ SENSITIVITY_LABELS = [
 ]
 
 
+def _open_now_label(apps, index: int) -> str:
+    """Menu text for the item that opens the selected app without the gesture.
+
+    The wording matters here: a "launch" entry is its own show/hide toggle
+    (Legion's menu is summoned and dismissed by re-running the exe - see
+    launcher.py), so an item labelled plain "打开" would look broken the first
+    time it put the menu away instead of bringing it up.
+    """
+    if not 0 <= index < len(apps):
+        return "立即打开选中的程序"
+    name = apps[index].get("name") or f"程序 {index + 1}"
+    if apps[index].get("method") == launcher.METHOD_LAUNCH:
+        return f"立即打开/收起「{name}」"
+    return f"立即打开「{name}」"
+
+
 def build_tray(on_toggle_enabled, on_toggle_hud, on_recalibrate, on_quit,
                on_set_fingers=None, initial_fingers=2, initial_show_hud=True,
                on_toggle_native_osd=None, initial_native_osd=True,
                on_set_sensitivity=None, initial_range_fraction=0.9,
                on_toggle_three_finger=None, initial_three_finger=True,
                three_finger_apps=None, initial_three_finger_app=0,
-               on_set_three_finger_app=None,
+               on_set_three_finger_app=None, on_open_three_finger_app=None,
                on_toggle_autostart=None, initial_autostart=False,
                initial_enabled=True) -> pystray.Icon:
     # Match the closest preset even if the stored value doesn't land exactly
@@ -74,6 +91,11 @@ def build_tray(on_toggle_enabled, on_toggle_hud, on_recalibrate, on_quit,
                 on_set_three_finger_app(index)
         return handler
 
+    def open_three_finger_app(icon, item):
+        # Same call the gesture makes, so the two can never drift apart.
+        if on_open_three_finger_app:
+            on_open_three_finger_app()
+
     def toggle_autostart(icon, item):
         want = not state["autostart"]
         # Trust what the callback reports the registry now holds, not `want`:
@@ -85,6 +107,28 @@ def build_tray(on_toggle_enabled, on_toggle_hud, on_recalibrate, on_quit,
 
     def quit_app(icon, item):
         on_quit()
+
+    # Built as a list (rather than inline in the Menu below) only so the
+    # "open it now" item can be appended after the radio choices.
+    three_finger_items = [
+        pystray.MenuItem(
+            app.get("name", f"程序 {i + 1}"),
+            set_three_finger_app(i),
+            checked=(lambda k: lambda item: state["three_finger_app"] == k)(i),
+            radio=True,
+        )
+        for i, app in enumerate(apps)
+    ]
+    # Picking one above only decides what the *gesture* opens, which is of no
+    # help when the tap is awkward (both hands busy) or when checking which
+    # entry is which. Text and enabled stay callables so they follow the
+    # current selection - pystray re-reads them every time the menu opens.
+    three_finger_items.append(pystray.Menu.SEPARATOR)
+    three_finger_items.append(pystray.MenuItem(
+        lambda item: _open_now_label(apps, state["three_finger_app"]),
+        open_three_finger_app,
+        enabled=lambda item: bool(apps),
+    ))
 
     menu = pystray.Menu(
         pystray.MenuItem(
@@ -130,15 +174,7 @@ def build_tray(on_toggle_enabled, on_toggle_hud, on_recalibrate, on_quit,
             toggle_three_finger,
             checked=lambda item: state["three_finger"],
         ),
-        pystray.MenuItem("三指轻点打开哪个", pystray.Menu(*(
-            pystray.MenuItem(
-                app.get("name", f"程序 {i + 1}"),
-                set_three_finger_app(i),
-                checked=(lambda k: lambda item: state["three_finger_app"] == k)(i),
-                radio=True,
-            )
-            for i, app in enumerate(apps)
-        ))),
+        pystray.MenuItem("三指轻点打开哪个", pystray.Menu(*three_finger_items)),
         pystray.MenuItem(
             "开机自启",
             toggle_autostart,
